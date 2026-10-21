@@ -237,3 +237,119 @@ func TestUpstreamLatencyNilSafe(t *testing.T) {
 		t.Fatal("nil context reported an accumulator")
 	}
 }
+
+// Each attempt reports only the upstream time accrued since it was marked, while
+// the request total keeps every attempt.
+func TestAttemptWindowCoversOnlyCurrentAttempt(t *testing.T) {
+	ctx := newTestCtx()
+	ctx.ResetUpstreamLatency()
+	if _, ok := GetAttemptWindow(ctx); ok {
+		t.Fatal("attempt window reported before any attempt was marked")
+	}
+
+	ctx.MarkAttemptStart()
+	AddUpstreamLatency(ctx, 100*time.Millisecond)
+	first, ok := GetAttemptWindow(ctx)
+	if !ok {
+		t.Fatal("no attempt window after MarkAttemptStart")
+	}
+	if first.Index != 1 {
+		t.Fatalf("first attempt index = %d, want 1", first.Index)
+	}
+	if first.Upstream() != 100*time.Millisecond {
+		t.Fatalf("first attempt upstream = %v, want 100ms", first.Upstream())
+	}
+
+	AddUpstreamLatency(ctx, 30*time.Millisecond) // between attempts, e.g. an MCP tool call
+	ctx.MarkAttemptStart()
+	AddUpstreamLatency(ctx, 200*time.Millisecond)
+	second, _ := GetAttemptWindow(ctx)
+	if second.Index != 2 {
+		t.Fatalf("second attempt index = %d, want 2", second.Index)
+	}
+	if second.Upstream() != 200*time.Millisecond {
+		t.Fatalf("second attempt upstream = %v, want 200ms", second.Upstream())
+	}
+	if second.Start.Before(first.Start) {
+		t.Fatalf("second attempt start %v is before the first %v", second.Start, first.Start)
+	}
+	if total, _ := GetUpstreamLatency(ctx); total != 330*time.Millisecond {
+		t.Fatalf("request upstream = %v, want 330ms", total)
+	}
+
+	var nilCtx *BifrostContext
+	nilCtx.MarkAttemptStart()
+	if _, ok := GetAttemptWindow(nilCtx); ok {
+		t.Fatal("typed-nil context reported an attempt window")
+	}
+}
+
+// Per-attempt cost on the request path: core marks each attempt, and logging reads
+// the window once per row.
+func BenchmarkAttemptWindow(b *testing.B) {
+	ctx := newTestCtx()
+	ctx.ResetUpstreamLatency()
+	b.ReportAllocs()
+	for b.Loop() {
+		ctx.MarkAttemptStart()
+		_, _ = GetAttemptWindow(ctx)
+	}
+}
+
+// Overlapping waits add their union: two 60ms waits sharing 40ms count ~80ms, not 120ms.
+func TestUpstreamWaitCountsOverlapOnce(t *testing.T) {
+	ctx := newTestCtx()
+	ctx.ResetUpstreamLatency()
+
+	first := BeginUpstreamWait(ctx)
+	time.Sleep(20 * time.Millisecond)
+	second := BeginUpstreamWait(ctx)
+	time.Sleep(40 * time.Millisecond)
+	first.End()
+	time.Sleep(20 * time.Millisecond)
+	second.End()
+
+	got, _ := GetUpstreamLatency(ctx)
+	if got < 80*time.Millisecond || got >= 120*time.Millisecond {
+		t.Fatalf("upstream = %v, want ~80ms (the union of the two waits, not their 120ms sum)", got)
+	}
+}
+
+// Waits that do not overlap each add their own span.
+func TestUpstreamWaitSequentialAddsEach(t *testing.T) {
+	ctx := newTestCtx()
+	ctx.ResetUpstreamLatency()
+	for range 2 {
+		w := BeginUpstreamWait(ctx)
+		time.Sleep(20 * time.Millisecond)
+		w.End()
+	}
+	if got, _ := GetUpstreamLatency(ctx); got < 40*time.Millisecond {
+		t.Fatalf("upstream = %v, want >= 40ms", got)
+	}
+}
+
+// No accumulator, a nil context, and a double End are all no-ops.
+func TestUpstreamWaitNilSafe(t *testing.T) {
+	BeginUpstreamWait(nil).End()
+	BeginUpstreamWait(newTestCtx()).End()
+	ctx := newTestCtx()
+	ctx.ResetUpstreamLatency()
+	w := BeginUpstreamWait(ctx)
+	w.End()
+	before, _ := GetUpstreamLatency(ctx)
+	w.End()
+	if after, _ := GetUpstreamLatency(ctx); after != before {
+		t.Fatalf("a second End changed upstream from %v to %v", before, after)
+	}
+}
+
+// Per-tool-call cost: one Begin/End pair around each MCP tool call.
+func BenchmarkUpstreamWait(b *testing.B) {
+	ctx := newTestCtx()
+	ctx.ResetUpstreamLatency()
+	b.ReportAllocs()
+	for b.Loop() {
+		BeginUpstreamWait(ctx).End()
+	}
+}
