@@ -1,5 +1,12 @@
 import { KnownProvidersNames } from "@/lib/constants/logs";
-import { aliasConfigSchema, oauthKeyConfigComplete, oauthKeyConfigSchema, secretVarSchema } from "@/lib/types/schemas";
+import {
+	aliasConfigSchema,
+	anthropicKeyConfigSchema,
+	anthropicWorkloadIdentityComplete,
+	oauthKeyConfigComplete,
+	oauthKeyConfigSchema,
+	secretVarSchema,
+} from "@/lib/types/schemas";
 import { isValidAliases, isValidVertexAuthCredentials } from "@/lib/utils/validation";
 import { z } from "zod";
 
@@ -258,6 +265,7 @@ const KeySchema = z.object({
 	sagemaker_key_config: SageMakerKeyConfigSchema.optional(),
 	replicate_key_config: ReplicateKeyConfigSchema.optional(),
 	oauth_key_config: oauthKeyConfigSchema.optional(),
+	anthropic_key_config: anthropicKeyConfigSchema.optional(),
 	use_for_batch_api: z.boolean().optional(),
 });
 
@@ -355,7 +363,11 @@ export const ProviderFormSchema = z
 					effectiveProviderType !== "vertex" &&
 					effectiveProviderType !== "bedrock" &&
 					!key.value.trim() &&
-					!oauthKeyConfigComplete(key.oauth_key_config)
+					!oauthKeyConfigComplete(key.oauth_key_config) &&
+					!(
+						key.anthropic_key_config?._auth_type !== "api_key" &&
+						anthropicWorkloadIdentityComplete(key.anthropic_key_config?.workload_identity)
+					)
 				) {
 					ctx.addIssue({
 						code: z.ZodIssueCode.custom,
