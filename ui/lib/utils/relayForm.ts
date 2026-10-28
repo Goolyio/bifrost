@@ -1,5 +1,11 @@
 import type { Relay, RelayJobConfig, RelayRouteConfig, RelaySecret, RelayUsageConfig } from "@/lib/types/relays";
-import { type RelayFormValues, relayAuthSchema, relayNetworkFormSchema, relayUsageBaseSchema } from "@/lib/types/schemas";
+import {
+	type RelayFormValues,
+	type RelayUsageForm,
+	relayAuthSchema,
+	relayNetworkFormSchema,
+	relayUsageBaseSchema,
+} from "@/lib/types/schemas";
 
 type FormSecret = { value?: string; ref?: string; type?: "plain_text" | "env" | "vault" };
 type FormUsage = RelayFormValues["usage"];
@@ -27,6 +33,45 @@ const toApiSecret = (s?: FormSecret): RelaySecret | undefined => {
 	if (!s || (!s.value?.trim() && !s.ref?.trim())) return undefined;
 	return { value: s.value ?? "", ...(s.ref ? { ref: s.ref } : {}), ...(s.type ? { type: s.type } : {}) };
 };
+
+type RouteOrderKey = Pick<RelayRouteConfig, "method" | "path" | "headers">;
+
+const GLOB_CHARS = /[*?[]/;
+const codePointOrder = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** The sort key of a route path; see compareRoutes. */
+function pathRank(path: string): number[] {
+	const segments = path.replace(/^\//, "").split("/");
+	const catchAll = segments[segments.length - 1] === "**";
+	const fixed = catchAll ? segments.slice(0, -1) : segments;
+	const glob = fixed.some((s) => GLOB_CHARS.test(s));
+	const literalLength = fixed.join("/").replace(/[*?]/g, "").length;
+	return [catchAll ? 1 : 0, catchAll ? -fixed.length : 0, glob ? 1 : 0, glob ? fixed.length : 0, glob ? -literalLength : 0];
+}
+
+/**
+ * The order routes are saved in. The relay takes the first route that matches, so a route must come
+ * before every broader route that also matches its requests. Literal paths never overlap one another
+ * and come first, A to Z. Globs follow by depth, more literal text first (/models/*:predict before
+ * /models/*), and a trailing /** catch-all comes last, deepest first. On the same path a route with
+ * header matchers precedes the plain one, which would otherwise take its requests.
+ */
+export function compareRoutes(a: RouteOrderKey, b: RouteOrderKey): number {
+	const ra = pathRank(a.path);
+	const rb = pathRank(b.path);
+	for (let i = 0; i < ra.length; i++) if (ra[i] !== rb[i]) return ra[i] - rb[i];
+	const headerKey = (r: RouteOrderKey) =>
+		Object.entries(r.headers ?? {})
+			.map(([name, value]) => `${name.toLowerCase()}: ${value}`)
+			.sort()
+			.join("\n");
+	return (
+		codePointOrder(a.path, b.path) ||
+		Object.keys(b.headers ?? {}).length - Object.keys(a.headers ?? {}).length ||
+		codePointOrder(a.method.toUpperCase(), b.method.toUpperCase()) ||
+		codePointOrder(headerKey(a), headerKey(b))
+	);
+}
 
 export function emptyRelayForm(): RelayFormValues {
 	return {
@@ -179,28 +224,30 @@ export function toRelayConfig(v: RelayFormValues): Relay {
 						},
 		usage: cleanUsage(v.usage, false),
 		streaming: streamingSet ? { ...v.streaming, paths: v.streaming.paths.filter((p) => p.trim()) } : undefined,
-		routes: v.routes.map((r) => {
-			const headers = Object.fromEntries(
-				r.headers.filter((h) => h.name.trim() && h.value.trim()).map((h) => [h.name.trim(), h.value.trim()]),
-			);
-			return {
-				method: r.method,
-				path: r.path.trim(),
-				...(Object.keys(headers).length ? { headers } : {}),
-				...(r.enabled === false ? { enabled: false } : {}),
-				...(r.billable !== undefined && r.billable !== routeBillableByDefault(r.method) ? { billable: r.billable } : {}),
-				...(r.stream !== undefined ? { stream: r.stream } : {}),
-				...(cleanUsage(r.usage, true) ? { usage: cleanUsage(r.usage, true) } : {}),
-				...(r.job ? { job: cleanJob(r.job) } : {}),
-			};
-		}),
+		routes: v.routes
+			.map((r) => {
+				const headers = Object.fromEntries(
+					r.headers.filter((h) => h.name.trim() && h.value.trim()).map((h) => [h.name.trim(), h.value.trim()]),
+				);
+				return {
+					method: r.method,
+					path: r.path.trim(),
+					...(Object.keys(headers).length ? { headers } : {}),
+					...(r.enabled === false ? { enabled: false } : {}),
+					...(r.billable !== undefined && r.billable !== routeBillableByDefault(r.method) ? { billable: r.billable } : {}),
+					...(r.stream !== undefined ? { stream: r.stream } : {}),
+					...(cleanUsage(r.usage, true) ? { usage: cleanUsage(r.usage, true) } : {}),
+					...(r.job ? { job: cleanJob(r.job) } : {}),
+				};
+			})
+			.sort(compareRoutes),
 		skip_route_check: v.skip_route_check || undefined,
 		ignore_upstream_cost: v.ignore_upstream_cost || undefined,
 	};
 }
 
 /** Drops a job's empty optional fields so the stored config carries only what was set. */
-export function cleanJob(job: RelayJobConfig): RelayJobConfig {
+export function cleanJob(job: Omit<RelayJobConfig, "usage"> & { usage?: RelayUsageForm }): RelayJobConfig {
 	const poll = {
 		...(job.poll.method ? { method: job.poll.method } : {}),
 		path: job.poll.path.trim(),
@@ -238,11 +285,14 @@ export function describePricing(u: RelayUsageConfig | undefined, ignoreUpstreamC
 }
 
 /** The mapping a route resolves to: the endpoint's, overridden field by field. */
-export function mergeUsage(base: RelayUsageConfig | undefined, override: RelayUsageConfig | undefined): RelayUsageConfig | undefined {
+export function mergeUsage(
+	base: RelayUsageConfig | RelayUsageForm | undefined,
+	override: RelayUsageConfig | RelayUsageForm | undefined,
+): RelayUsageConfig | undefined {
 	if (!base && !override) return undefined;
-	const out: RelayUsageConfig = { ...(base ?? {}) };
-	for (const [k, v] of Object.entries(override ?? {})) {
-		if (v === undefined || v === "") continue;
+	const out: RelayUsageConfig = {};
+	for (const [k, v] of [...Object.entries(base ?? {}), ...Object.entries(override ?? {})]) {
+		if (v === undefined || v === null || v === "") continue;
 		(out as Record<string, unknown>)[k] = v;
 	}
 	return out;

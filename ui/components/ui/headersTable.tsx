@@ -40,6 +40,8 @@ interface HeadersTableProps<T extends HeaderValue> {
 	renderKeyInput?: (params: CellRenderParams) => React.ReactNode;
 	/** Optional custom renderer for the value cell input */
 	renderValueInput?: (params: CellRenderParams) => React.ReactNode;
+	/** When set, the built-in inputs get `<prefix>-name-<row>` and `<prefix>-value-<row>` test ids. */
+	testIdPrefix?: string;
 }
 
 // Empty SecretVar for new rows
@@ -77,6 +79,7 @@ export function HeadersTable<T extends HeaderValue>({
 	fixedKeys,
 	renderKeyInput,
 	renderValueInput,
+	testIdPrefix,
 }: HeadersTableProps<T>) {
 	// Use explicit prop if provided, otherwise detect from existing values
 	const isSecretVarMode = useSecretVarInput ?? Object.values(value || {}).some((v) => isSecretVar(v));
@@ -274,6 +277,7 @@ export function HeadersTable<T extends HeaderValue>({
 													value={hasConflict ? conflictKey : key}
 													data-row={index}
 													data-column="key"
+													data-testid={testIdPrefix ? `${testIdPrefix}-name-${index}` : undefined}
 													onChange={(e) => handleKeyChange(key, e.target.value, headerValue, index)}
 													onKeyDown={(e) => handleKeyDown(e, index, "key")}
 													className={cn("border-0 focus-visible:ring-0 focus-visible:ring-offset-0", hasConflict && "text-destructive")}
@@ -302,6 +306,7 @@ export function HeadersTable<T extends HeaderValue>({
 												value={headerValue as SecretVar}
 												data-row={index}
 												data-column="value"
+												data-testid={testIdPrefix ? `${testIdPrefix}-value-${index}` : undefined}
 												onChange={(secretVar) => handleValueChange(key, secretVar, index)}
 												onKeyDown={(e) => handleKeyDown(e, index, "value")}
 												className="border-0 focus-visible:ring-0 focus-visible:ring-offset-0"
@@ -313,6 +318,7 @@ export function HeadersTable<T extends HeaderValue>({
 												value={getDisplayValue(headerValue)}
 												data-row={index}
 												data-column="value"
+												data-testid={testIdPrefix ? `${testIdPrefix}-value-${index}` : undefined}
 												onChange={(e) => handleValueChange(key, e.target.value, index)}
 												onKeyDown={(e) => handleKeyDown(e, index, "value")}
 												className="border-0 focus-visible:ring-0 focus-visible:ring-offset-0"

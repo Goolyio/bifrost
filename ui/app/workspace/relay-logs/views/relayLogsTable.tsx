@@ -229,7 +229,11 @@ export function RelayLogsDataTable({
 						</TableRow>
 						{table.getRowModel().rows.length ? (
 							table.getRowModel().rows.map((row) => (
-								<TableRow key={row.id} className="hover:bg-muted/50 group/table-row min-h-[40px] cursor-pointer">
+								<TableRow
+									key={row.id}
+									data-log-id={row.original.id}
+									className="hover:bg-muted/50 group/table-row min-h-[40px] cursor-pointer"
+								>
 									{row.getVisibleCells().map((cell) => {
 										const pinned = cell.column.getIsPinned();
 										const size = cell.column.getSize();
