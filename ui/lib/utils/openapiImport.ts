@@ -141,11 +141,16 @@ export function authFromSecuritySchemes(doc: Doc, security: unknown = doc.securi
 }
 
 // baseUrlFromServers reads the first absolute server URL (OpenAPI 3) or host + basePath (Swagger 2).
-export function baseUrlFromServers(doc: Doc): string | undefined {
+// With documentUrl (a fetched document), a relative server resolves against it, and a Swagger 2
+// document without a host takes the documentUrl's, as both specifications define.
+export function baseUrlFromServers(doc: Doc, documentUrl?: string): string | undefined {
 	const servers = Array.isArray(doc.servers) ? doc.servers : [];
 	for (const raw of servers) {
 		const url = asString(asRecord(raw)?.url);
-		if (url && /^https?:\/\//i.test(url) && !url.includes("{")) return url.replace(/\/+$/, "");
+		if (!url || url.includes("{")) continue;
+		if (/^https?:\/\//i.test(url)) return url.replace(/\/+$/, "");
+		const resolved = resolveAgainst(url, documentUrl);
+		if (resolved) return resolved;
 	}
 	const host = asString(doc.host);
 	if (host) {
@@ -154,7 +159,19 @@ export function baseUrlFromServers(doc: Doc): string | undefined {
 		const basePath = asString(doc.basePath) ?? "";
 		return `${scheme}://${host}${basePath}`.replace(/\/+$/, "");
 	}
+	if (doc.swagger !== undefined) return resolveAgainst(asString(doc.basePath) ?? "/", documentUrl);
 	return undefined;
+}
+
+function resolveAgainst(url: string, documentUrl: string | undefined): string | undefined {
+	if (!documentUrl) return undefined;
+	try {
+		const resolved = new URL(url, documentUrl);
+		if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return undefined;
+		return `${resolved.origin}${resolved.pathname}`.replace(/\/+$/, "");
+	} catch {
+		return undefined;
+	}
 }
 
 // AWS specifications key every operation of a JSON-protocol API as "/#X-Amz-Target=Service.Op": the
@@ -171,7 +188,7 @@ export function templateToRoute(template: string): { path: string; headers?: Rec
 }
 
 // importOpenAPI resolves a parsed document into endpoint fields.
-export function importOpenAPI(doc: Doc): OpenAPIImport {
+export function importOpenAPI(doc: Doc, documentUrl?: string): OpenAPIImport {
 	const info = asRecord(doc.info);
 	const result: OpenAPIImport = { title: asString(info?.title), version: asString(info?.version), routes: [], warnings: [] };
 	const paths = asRecord(doc.paths);
@@ -226,6 +243,6 @@ export function importOpenAPI(doc: Doc): OpenAPIImport {
 		if (first.auth) result.auth = first.auth;
 		if (first.warning) result.warnings.push(first.warning);
 	}
-	result.baseUrl = baseUrlFromServers(doc);
+	result.baseUrl = baseUrlFromServers(doc, documentUrl);
 	return result;
 }
